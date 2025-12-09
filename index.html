@@ -248,7 +248,7 @@
 <body>
 
   <div class="container">
-    <h1>📚 EPUB Professional Editor v1.10 </h1>
+    <h1>📚 EPUB Professional Editor v1.30 </h1>
     <p>
       Load an EPUB to edit metadata, fix covers, generate TOCs, or bulk find-and-replace text.
     </p>
@@ -293,6 +293,12 @@
             <input type="checkbox" id="coverFirstPage" checked>
             Ensure cover is the first item in spine order
           </label>
+        </div>
+
+        <!-- New UI: Add Front Page Button -->
+        <div class="metadata-field">
+          <button id="addFrontPageBtn" class="btn btn-secondary">Add Front Page (Use current cover)</button>
+          <small>If the book has no cover wrapper/front-page, this creates a simple front page XHTML that displays the current cover image and inserts it at the start of the spine.</small>
         </div>
       </div>
 
@@ -396,6 +402,7 @@
     // Buttons
     const processBtn = document.getElementById('processBtn');
     const previewTocBtn = document.getElementById('previewTocBtn');
+    const addFrontPageBtn = document.getElementById('addFrontPageBtn');
 
     // Find/Replace Modal Elements
     const frModal = document.getElementById('frModal');
@@ -636,7 +643,177 @@ async function updateCoverHtmlReferences(opfDoc, zip, newFileName, previousCover
     console.error(err);
     log("Error updating cover HTML wrappers: " + err.message, "error");
   }
-} 
+}
+
+/**
+ * Determine cover item/href from OPF document if present.
+ * Returns {coverItem, coverHref, coverId} or null if none found.
+ */
+function getCoverInfo(opfDoc) {
+  const manifest = opfDoc.getElementsByTagNameNS(OPF_NS, "manifest")[0];
+  if (!manifest) return null;
+
+  // Strategy A: item with properties cover-image (EPUB3)
+  let coverItem = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"))
+    .find(i => (i.getAttribute('properties') || '').split(/\s+/).includes('cover-image'));
+
+  // Strategy B: meta[name="cover"] pointing to id (EPUB2)
+  if (!coverItem) {
+    const metaCover = opfDoc.querySelector('meta[name="cover"]');
+    if (metaCover) {
+      const coverId = metaCover.getAttribute('content');
+      coverItem = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"))
+        .find(i => i.getAttribute('id') === coverId);
+    }
+  }
+
+  // Strategy C: fallback - item with id/href containing 'cover' or first image
+  if (!coverItem) {
+    coverItem = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"))
+      .find(i => {
+        const media = (i.getAttribute('media-type') || '').toLowerCase();
+        const id = (i.getAttribute('id') || '').toLowerCase();
+        const href = (i.getAttribute('href') || '').toLowerCase();
+        return (media.startsWith('image/') && (id.includes('cover') || href.includes('cover')));
+      });
+  }
+
+  if (!coverItem) {
+    // Try to pick the first image as last resort
+    coverItem = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"))
+      .find(i => (i.getAttribute('media-type') || '').toLowerCase().startsWith('image/'));
+  }
+
+  if (!coverItem) return null;
+
+  const coverHref = coverItem.getAttribute('href');
+  return { coverItem, coverHref, coverId: coverItem.getAttribute('id') };
+}
+
+/**
+ * Ensure the book contains a front-page XHTML that displays the cover image.
+ * If a front page already exists (spine first item is a wrapper referencing the cover), nothing is done.
+ * This function adds a new XHTML file to OPF content dir, registers it in manifest, and inserts itemref at the beginning of spine.
+ */
+async function ensureFrontCoverPage(opfDoc, zip) {
+  try {
+    const coverInfo = getCoverInfo(opfDoc);
+    if (!coverInfo) {
+      log("No cover image found in manifest to create a front page.", "error");
+      return false;
+    }
+    const coverHref = coverInfo.coverHref; // may contain path relative to opfContentDir
+    if (!coverHref) {
+      log("Cover href missing; cannot create front page.", "error');
+      return false;
+    }
+
+    // Check if there's already a front page referencing the cover
+    const manifest = opfDoc.getElementsByTagNameNS(OPF_NS, "manifest")[0];
+    const spine = opfDoc.getElementsByTagNameNS(OPF_NS, "spine")[0];
+
+    // Check first spine item: if it references an HTML/XHTML that contains the coverHref or an img with 'cover' we consider it present
+    const firstItemRef = spine ? spine.getElementsByTagNameNS(OPF_NS, "itemref")[0] : null;
+    if (firstItemRef) {
+      const firstIdref = firstItemRef.getAttribute('idref');
+      const firstItem = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item")).find(i => i.getAttribute('id') === firstIdref);
+      if (firstItem) {
+        const media = (firstItem.getAttribute('media-type') || '').toLowerCase();
+        if (media === 'application/xhtml+xml' || media === 'text/html') {
+          const href = firstItem.getAttribute('href');
+          const file = zip.file(opfContentDir + href);
+          if (file) {
+            const text = await file.async("text");
+            if (text.includes(coverHref) || /<img\b[^>]*\bsrc=["'][^"']*cover[^"']*["']/i.test(text)) {
+              log("A front page referencing the cover already exists as the first spine item.", "info");
+              return false;
+            }
+          }
+        }
+      }
+    }
+
+    // Search other HTML files in spine for an existing cover wrapper (if it's already present somewhere)
+    const spineItemRefs = spine ? Array.from(spine.getElementsByTagNameNS(OPF_NS, "itemref")) : [];
+    for (const ref of spineItemRefs) {
+      const idref = ref.getAttribute('idref');
+      const item = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item")).find(i => i.getAttribute('id') === idref);
+      if (!item) continue;
+      const media = (item.getAttribute('media-type') || '').toLowerCase();
+      if (media === 'application/xhtml+xml' || media === 'text/html') {
+        const href = item.getAttribute('href');
+        const file = zip.file(opfContentDir + href);
+        if (!file) continue;
+        const text = await file.async("text");
+        if (text.includes(coverHref) || /<img\b[^>]*\bsrc=["'][^"']*cover[^"']*["']/i.test(text)) {
+          // Found a wrapper somewhere in spine; move it to first position
+          const itemRef = Array.from(spine.getElementsByTagNameNS(OPF_NS, "itemref")).find(r => r.getAttribute('idref') === idref);
+          if (itemRef && spine.firstChild !== itemRef) {
+            spine.insertBefore(itemRef, spine.firstChild);
+            log(`Found existing cover wrapper (${href}) in spine; moved to first position.`, "success");
+            return true;
+          }
+        }
+      }
+    }
+
+    // No wrapper found - create a simple XHTML front page
+    const timestamp = Date.now();
+    const pageFilename = `cover_page_${timestamp}.xhtml`;
+    const pageFullPath = opfContentDir + pageFilename;
+    const coverSrcRelative = coverHref; // usually relative to content dir
+
+    const xhtml = `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="${(opfDoc.getElementsByTagNameNS(DC_NS,'language')[0]?.textContent || 'en')}">
+<head>
+  <title>Cover</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style type="text/css"> 
+    body { margin:0; padding:0; background: #ffffff; display:flex; align-items:center; justify-content:center; min-height:100vh; }
+    img { max-width:100%; height:auto; display:block; margin:0 auto; }
+  </style>
+</head>
+<body>
+  <div><img src="${coverSrcRelative}" alt="Cover"/></div>
+</body>
+</html>`;
+
+    // Add file to zip
+    zip.file(pageFullPath, xhtml);
+    log(`Created front page: ${pageFullPath}`, "success");
+
+    // Register in manifest
+    // Ensure unique id
+    let coverPageId = `cover-page-${timestamp}`;
+    const newItem = opfDoc.createElementNS(OPF_NS, "item");
+    newItem.setAttribute('id', coverPageId);
+    newItem.setAttribute('href', pageFilename);
+    newItem.setAttribute('media-type', 'application/xhtml+xml');
+    manifest.appendChild(newItem);
+
+    // Insert itemref at start of spine
+    const itemref = opfDoc.createElementNS(OPF_NS, "itemref");
+    itemref.setAttribute('idref', coverPageId);
+    // Optional: mark as linear="yes"
+    itemref.setAttribute('linear', 'yes');
+
+    const firstRef = spine.getElementsByTagNameNS(OPF_NS, "itemref")[0];
+    if (firstRef) {
+      spine.insertBefore(itemref, firstRef);
+    } else {
+      spine.appendChild(itemref);
+    }
+
+    log(`Added front page to manifest and inserted at the start of spine.`, "success");
+    return true;
+  } catch (err) {
+    console.error(err);
+    log("Error creating front cover page: " + err.message, "error");
+    return false;
+  }
+}
 
     async function processSpineOrder(opfDoc) {
     if (!document.getElementById('coverFirstPage').checked) return;
@@ -647,7 +824,7 @@ async function updateCoverHtmlReferences(opfDoc, zip, newFileName, previousCover
     // Try to identify the Cover HTML Wrapper (not the image itself)
     // Usually has "cover" in ID or is first linear="no"
     const items = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"));
-    const coverHtmlItem = items.find(i => i.getAttribute("id").toLowerCase().includes("cover") && i.getAttribute("media-type") === "application/xhtml+xml");
+    const coverHtmlItem = items.find(i => (i.getAttribute("id") || '').toLowerCase().includes("cover") && i.getAttribute("media-type") === "application/xhtml+xml");
 
     if (coverHtmlItem) {
     const id = coverHtmlItem.getAttribute("id");
@@ -875,6 +1052,36 @@ async function updateCoverHtmlReferences(opfDoc, zip, newFileName, previousCover
     document.getElementById('tocPreviewOutput').style.display = 'block';
     });
 
+    // Handler for Add Front Page (UI button)
+    addFrontPageBtn.addEventListener('click', async () => {
+      if (!currentZip) {
+        log("No EPUB loaded.", "error");
+        return;
+      }
+      try {
+        // Re-load OPF
+        const opfStr = await currentZip.file(opfRootPath).async("text");
+        const opfDoc = parser.parseFromString(opfStr, "application/xml");
+
+        // If user staged a new cover file, process it first to ensure manifest points to it
+        if (newCoverFile) {
+          await processCover(opfDoc, currentZip);
+        }
+
+        const created = await ensureFrontCoverPage(opfDoc, currentZip);
+        if (created) {
+          // Save updated OPF into zip
+          currentZip.file(opfRootPath, serializer.serializeToString(opfDoc));
+          log("Front page created and OPF updated. It will be included in the next generation/download.", "success");
+        } else {
+          log("No front page created (one may already exist).", "info");
+        }
+      } catch (err) {
+        console.error(err);
+        log("Error while adding front page: " + err.message, "error");
+      }
+    });
+
     // Main Process Handler
     processBtn.addEventListener('click', async () => {
     if (!currentZip) return;
@@ -904,6 +1111,10 @@ async function updateCoverHtmlReferences(opfDoc, zip, newFileName, previousCover
 
     // 2. Cover Fix
     await processCover(opfDoc, currentZip);
+
+    // 2b. Ensure front cover page exists (if user wants the cover as front page)
+    await ensureFrontCoverPage(opfDoc, currentZip);
+
     await processSpineOrder(opfDoc);
 
     // 3. Find & Replace (Bulk)
