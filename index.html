@@ -248,7 +248,7 @@
 <body>
 
   <div class="container">
-    <h1>📚 EPUB Professional Editor v1.30 </h1>
+    <h1>📚 EPUB Professional Editor v1.35 </h1>
     <p>
       Load an EPUB to edit metadata, fix covers, generate TOCs, or bulk find-and-replace text.
     </p>
@@ -704,7 +704,7 @@ async function ensureFrontCoverPage(opfDoc, zip) {
     }
     const coverHref = coverInfo.coverHref; // may contain path relative to opfContentDir
     if (!coverHref) {
-      log("Cover href missing; cannot create front page.", "error');
+      log("Cover href missing; cannot create front page.", "error");
       return false;
     }
 
