@@ -28,7 +28,6 @@ This editor is designed to streamline the EPUB preparation process with a focus 
 
 * **Frontend:** HTML5, CSS3 (Vanilla), JavaScript (Vanilla)
 * **Key Library:** **[JSZip](https://stuk.github.io/jszip/)** for reading, modifying, and writing `.zip` files (EPUB format).
-* **Development Tools:** **[Eruda](https://github.com/liriliri/eruda)** is included for mobile debugging convenience during development.
 * **Styling:** Custom CSS implementing a modern, dark-themed UI.
 
 ## 🚀 Getting Started
