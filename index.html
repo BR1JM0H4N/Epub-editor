@@ -248,7 +248,7 @@
 <body>
 
   <div class="container">
-    <h1>📚 EPUB Professional Editor v1.0 </h1>
+    <h1>📚 EPUB Professional Editor v1.10 </h1>
     <p>
       Load an EPUB to edit metadata, fix covers, generate TOCs, or bulk find-and-replace text.
     </p>
@@ -465,68 +465,178 @@
     if (newCoverFile) log(`Cover image staged: ${newCoverFile.name}`);
     });
 
-    async function processCover(opfDoc, zip) {
-    if (!newCoverFile) return;
+   /* Replace the current processCover function with this version and add the helper below it. */
 
-    log("Processing new cover image...", "highlight");
+async function processCover(opfDoc, zip) {
+  if (!newCoverFile) return;
 
-    const ext = newCoverFile.name.split('.').pop().toLowerCase();
-    const mime = newCoverFile.type || (ext === 'png' ? 'image/png': 'image/jpeg');
-    // Unique name to avoid cache/overlap issues
-    const newFileName = `cover_new_${Date.now()}.${ext}`;
-    const newFilePath = opfContentDir + newFileName;
+  log("Processing new cover image...", "highlight");
 
-    // 1. Add file to Zip
-    zip.file(newFilePath, newCoverFile);
+  const ext = newCoverFile.name.split('.').pop().toLowerCase();
+  const mime = newCoverFile.type || (ext === 'png' ? 'image/png' : 'image/jpeg');
+  // Unique name to avoid cache/overlap issues
+  const newFileName = `cover_new_${Date.now()}.${ext}`;
+  const newFilePath = opfContentDir + newFileName;
 
-    // 2. Update/Create Manifest Item
-    const manifest = opfDoc.getElementsByTagNameNS(OPF_NS, "manifest")[0];
-    let coverItem = null;
+  // 1. Add file to Zip
+  zip.file(newFilePath, newCoverFile);
 
-    // Strategy A: Find by property="cover-image" (EPUB 3)
-    coverItem = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"))
+  // 2. Update/Create Manifest Item
+  const manifest = opfDoc.getElementsByTagNameNS(OPF_NS, "manifest")[0];
+  let coverItem = null;
+
+  // Strategy A: Find by property="cover-image" (EPUB 3)
+  coverItem = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"))
     .find(i => i.getAttribute('properties') === 'cover-image');
 
-    // Strategy B: If not found, look for reference in <meta name="cover"> (EPUB 2)
-    if (!coverItem) {
+  // Strategy B: If not found, look for reference in <meta name="cover"> (EPUB 2)
+  let previousCoverHref = null;
+  if (!coverItem) {
     const metaCover = opfDoc.querySelector('meta[name="cover"]');
     if (metaCover) {
-    const coverId = metaCover.getAttribute('content');
-    coverItem = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"))
-    .find(i => i.getAttribute('id') === coverId);
+      const coverId = metaCover.getAttribute('content');
+      coverItem = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"))
+        .find(i => i.getAttribute('id') === coverId);
     }
-    }
+  }
 
-    // Create if doesn't exist
-    if (!coverItem) {
+  // If coverItem exists, capture previous href for searching/updating cover HTML
+  if (coverItem) {
+    previousCoverHref = coverItem.getAttribute('href') || null;
+  }
+
+  // Create if doesn't exist
+  if (!coverItem) {
     coverItem = opfDoc.createElementNS(OPF_NS, "item");
     coverItem.setAttribute("id", "cover-image-item");
     coverItem.setAttribute("properties", "cover-image"); // EPUB 3
     manifest.appendChild(coverItem);
     log("Created new manifest item for cover.");
-    }
+  }
 
-    // Update attributes
-    coverItem.setAttribute("href", newFileName);
-    coverItem.setAttribute("media-type", mime);
-    if (!coverItem.getAttribute('properties')) coverItem.setAttribute('properties', 'cover-image');
+  // Update attributes (href is filename relative to OPF)
+  coverItem.setAttribute("href", newFileName);
+  coverItem.setAttribute("media-type", mime);
+  if (!coverItem.getAttribute('properties')) coverItem.setAttribute('properties', 'cover-image');
 
-    const coverItemId = coverItem.getAttribute("id");
+  const coverItemId = coverItem.getAttribute("id");
 
-    // 3. Update/Create EPUB 2 <meta name="cover">
-    // Many readers ONLY look at this!
-    let metaBlock = opfDoc.getElementsByTagNameNS(OPF_NS, "metadata")[0];
-    let metaCoverTag = metaBlock.querySelector('meta[name="cover"]');
+  // 3. Update/Create EPUB 2 <meta name="cover">
+  // Many readers ONLY look at this!
+  let metaBlock = opfDoc.getElementsByTagNameNS(OPF_NS, "metadata")[0];
+  let metaCoverTag = metaBlock.querySelector('meta[name="cover"]');
 
-    if (!metaCoverTag) {
+  if (!metaCoverTag) {
     metaCoverTag = opfDoc.createElementNS(OPF_NS, "meta");
     metaCoverTag.setAttribute("name", "cover");
     metaBlock.appendChild(metaCoverTag);
-    }
-    metaCoverTag.setAttribute("content", coverItemId);
+  }
+  metaCoverTag.setAttribute("content", coverItemId);
 
-    log(`Cover updated. Manifest ID: ${coverItemId} -> ${newFileName}`, "success");
+  log(`Cover updated. Manifest ID: ${coverItemId} -> ${newFileName}`, "success");
+
+  // 4. Update any cover HTML/XHTML wrapper(s) to reference the new image
+  await updateCoverHtmlReferences(opfDoc, zip, newFileName, previousCoverHref);
+}
+
+/**
+ * Update cover HTML/XHTML wrapper files so their <img src="..."> points to the new cover filename.
+ * - opfDoc: parsed OPF Document
+ * - zip: JSZip instance
+ * - newFileName: filename placed in OPF manifest (no path)
+ * - previousCoverHref: old href value (if any) to look for and replace
+ */
+async function updateCoverHtmlReferences(opfDoc, zip, newFileName, previousCoverHref) {
+  try {
+    const manifest = opfDoc.getElementsByTagNameNS(OPF_NS, "manifest")[0];
+    if (!manifest) return;
+
+    const items = Array.from(manifest.getElementsByTagNameNS(OPF_NS, "item"));
+
+    // Heuristics: find items that are HTML/XHTML and likely to be a cover wrapper
+    const candidates = items.filter(i => {
+      const media = (i.getAttribute('media-type') || '').toLowerCase();
+      const id = (i.getAttribute('id') || '').toLowerCase();
+      const href = (i.getAttribute('href') || '').toLowerCase();
+      return (media === 'application/xhtml+xml' || media === 'text/html') &&
+        (id.includes('cover') || href.includes('cover') || href.endsWith('.xhtml') && id === '');
+    });
+
+    for (const item of candidates) {
+      const href = item.getAttribute('href');
+      const fullPath = opfContentDir + href;
+      const file = zip.file(fullPath);
+      if (!file) continue;
+
+      let html = await file.async("text");
+      let updated = html;
+
+      // 1) Prefer exact replacement if we learned previousCoverHref
+      if (previousCoverHref) {
+        // Replace exact usages of previousCoverHref (both plain and encoded)
+        updated = updated.split(previousCoverHref).join(newFileName);
+        // Also try replacing opfContentDir + previousCoverHref references if present
+        const prevWithDir = opfContentDir + previousCoverHref;
+        updated = updated.split(prevWithDir).join(opfContentDir + newFileName);
+      }
+
+      // 2) If no change yet, try to replace <img ... src="...cover..."> occurrences
+      if (updated === html) {
+        updated = updated.replace(/(<img\b[^>]*\bsrc=)(["'])([^"']*\bcover\b[^"']*\.(?:jpe?g|png|gif))\2/gi,
+          (m, p1, p2) => `${p1}${p2}${newFileName}${p2}`);
+      }
+
+      // 3) Fallback: if still unchanged, replace first image src that points to an image file in same folder
+      if (updated === html) {
+        updated = updated.replace(/(<img\b[^>]*\bsrc=)(["'])([^"']+\.(?:jpe?g|png|gif))\2/i,
+          (m, p1, p2) => `${p1}${p2}${newFileName}${p2}`);
+      }
+
+      if (updated !== html) {
+        zip.file(fullPath, updated);
+        log(`Updated cover wrapper: ${fullPath} -> now references ${newFileName}`, "success");
+      } else {
+        log(`No img src updated in wrapper: ${fullPath}`, "info");
+      }
     }
+
+    // If no candidates were found, attempt a broader search across all HTML/XHTML files
+    if (candidates.length === 0) {
+      let changedAny = false;
+      for (const filename in zip.files) {
+        if (!filename.match(/\.(xhtml|html|htm)$/i)) continue;
+        // Skip OPF and container
+        if (filename.includes(opfRootPath) || filename.includes('META-INF/container.xml')) continue;
+
+        const file = zip.file(filename);
+        let html = await file.async("text");
+        let updated = html;
+
+        if (previousCoverHref) {
+          updated = updated.split(previousCoverHref).join(newFileName);
+          const prevWithDir = opfContentDir + previousCoverHref;
+          updated = updated.split(prevWithDir).join(opfContentDir + newFileName);
+        }
+
+        if (updated === html) {
+          updated = updated.replace(/(<img\b[^>]*\bsrc=)(["'])([^"']*\bcover\b[^"']*\.(?:jpe?g|png|gif))\2/gi,
+            (m, p1, p2) => `${p1}${p2}${newFileName}${p2}`);
+        }
+
+        if (updated !== html) {
+          zip.file(filename, updated);
+          log(`Updated cover reference in: ${filename}`, "success");
+          changedAny = true;
+        }
+      }
+      if (!changedAny) log("No cover wrapper found to update; cover image was added to manifest only.", "info");
+    }
+
+  } catch (err) {
+    console.error(err);
+    log("Error updating cover HTML wrappers: " + err.message, "error");
+  }
+} 
 
     async function processSpineOrder(opfDoc) {
     if (!document.getElementById('coverFirstPage').checked) return;
