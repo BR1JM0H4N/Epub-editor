@@ -248,7 +248,7 @@
 <body>
 
   <div class="container">
-    <h1>📚 EPUB Professional Editor</h1>
+    <h1>📚 EPUB Professional Editor v1.0 </h1>
     <p>
       Load an EPUB to edit metadata, fix covers, generate TOCs, or bulk find-and-replace text.
     </p>
